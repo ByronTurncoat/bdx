@@ -8,3 +8,6 @@ gwt-vecmath.jar
 .settings
 bin
 .classpath
+.idea
+*.iml
+*target*
