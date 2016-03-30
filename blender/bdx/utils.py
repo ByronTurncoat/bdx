@@ -228,3 +228,11 @@ def str_to_valid_java_class_name(input_string):
             class_name.append('_'+str(ord(char))+'_')
 
     return "".join(class_name)
+
+
+def select_children_recursive(obj_parent, type_mask = {'EMPTY'}):
+    for obj in obj_parent.children:
+        select_children_recursive(obj)
+        if obj.type not in type_mask:
+            obj.select = True
+# select_children_recursive(bpy.context.object, {'EMPTY', 'LAMP'})

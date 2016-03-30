@@ -8,11 +8,14 @@ import shutil
 import bpy
 import mathutils as mt
 import numpy
+import subprocess
 from collections import OrderedDict
 from bpy_extras.io_utils import ExportHelper
 from bpy.props import StringProperty, EnumProperty, BoolProperty
 from bpy.types import Operator
 from . import utils as ut
+
+j = os.path.join
 
 
 def poly_indices(poly):
@@ -228,7 +231,6 @@ def vertices_text(text, angel_code):
     return verts
 
 def srl_models_text(texts, fntx_dir):
-    j = os.path.join
 
     def fntx(t):
         with open(j(fntx_dir, t.font.name + ".fntx"), 'r') as f:
@@ -557,10 +559,15 @@ def srl_objects(objects):
 
 
 def used_materials(objects):
-    return sum([[m for m in o.data.materials if m] for o in objects
-                if o.type == "MESH"], [])
+    return sum([[m for m in o.data.materials if m] for o in objects], [])
+
 
 def srl_materials(materials):
+    """
+    Compile the material information for the scene beyond what's available in g3d format
+    :param materials: A list of materials appearing in the scene
+    :return: A list of texture information
+    """
     def texture_name(m):
         if m.active_texture and hasattr(m.active_texture, "image"):
             filepath = m.active_texture.image.filepath
@@ -568,17 +575,24 @@ def srl_materials(materials):
             return filepath[filepath.find(textures_dir)+len(textures_dir)+1:]
         return None
 
-    return {m.name:
-                {"texture": texture_name(m),
-                 "alpha_blend": "ALPHA" if m.use_transparency else "OPAQUE",
-                 "color": list(m.diffuse_color),
-                 "spec_color": list(m.specular_color),
-                 "shininess": m.specular_hardness,
-                 "opacity": m.alpha,
-                 "shadeless": m.use_shadeless,
-                 "emit": m.emit,
-                 "backface_culling": m.game_settings.use_backface_culling}
-            for m in materials}
+    def texture_info(m):
+        return {
+            'texture': texture_name(m),
+            'backface_culling': m.game_settings.use_backface_culling
+        }
+
+    return [texture_info(m) for m in materials]
+    # return {m.name:
+    #             {"texture": texture_name(m),
+    #              "alpha_blend": "ALPHA" if m.use_transparency else "OPAQUE",
+    #              "color": list(m.diffuse_color),
+    #              "spec_color": list(m.specular_color),
+    #              "shininess": m.specular_hardness,
+    #              "opacity": m.alpha,
+    #              "shadeless": m.use_shadeless,
+    #              "emit": m.emit,
+    #              "backface_culling": m.game_settings.use_backface_culling}
+    #         for m in materials}
 
 
 def camera_names(scene):
@@ -662,7 +676,7 @@ def instantiator(objects):
 
 
 def srl_actions(actions):
-    relevant = {"location":0, "rotation_euler":3, "scale":6}
+    relevant = {"location": 0, "rotation_euler": 3, "scale": 6}
 
     index = lambda c: relevant[c.data_path] + c.array_index
 
@@ -683,7 +697,6 @@ def texts(objects):
     return [o.data for o in objects if o.type == "FONT"]
 
 def generate_bitmap_fonts(fonts, hiero_dir, fonts_dir, textures_dir):
-    j = os.path.join
 
     # list of fonts to export
     existing = os.listdir(fonts_dir)
@@ -745,11 +758,7 @@ def generate_bitmap_fonts(fonts, hiero_dir, fonts_dir, textures_dir):
         os.remove(f)
 
 
-scene = None
-
-
 def export(context, filepath, scene_name, exprun, apply_modifier):
-    global scene
     scene = bpy.data.scenes[scene_name] if scene_name else context.scene
 
     objects = list(scene.objects)
@@ -792,7 +801,6 @@ def export(context, filepath, scene_name, exprun, apply_modifier):
     }
 
     if exprun:
-        j = os.path.join
 
         bdx_dir = j(ut.project_root(), "android", "assets", "bdx")
         fonts_dir = j(bdx_dir, "fonts")
@@ -818,6 +826,80 @@ def export(context, filepath, scene_name, exprun, apply_modifier):
 
     with open(filepath, "w") as f:
         json.dump(bdx, f)
+
+    return {'FINISHED'}
+
+
+def export_ebg(context, filepath, scene_name, exprun, apply_modifier):
+    scene = bpy.data.scenes[scene_name] if scene_name else context.scene
+
+    objects = list(scene.objects)
+
+    def instance_referenced(objects):
+        instances = [o for o in objects if o.dupli_group]
+        expanded = sum([list(o.dupli_group.objects) for o in instances], [])
+
+        if expanded:
+            return expanded + instance_referenced(expanded)
+        return []
+
+    objects = set(objects + instance_referenced(objects))
+
+    ts = texts(objects)
+    fonts = used_fonts(ts)
+
+    if scene.world is not None:
+        ambient_color = list(scene.world.ambient_color)
+        clear_color = list(scene.world.horizon_color)
+    else:
+        ambient_color = [0.0, 0.0, 0.0]
+        clear_color = [0.051, 0.051, 0.051]
+
+    bdx = {
+        "name": scene.name,
+        "gravity": scene.game_settings.physics_gravity,
+        "physviz": scene.game_settings.show_physics_visualization,
+        "framerateProfile": scene.game_settings.show_framerate_profile,
+        "ambientColor": ambient_color,
+        "objects": srl_objects(objects),
+        "materials": srl_materials(used_materials(objects)),
+        "cameras": camera_names(scene),
+        "fonts": [f.name for f in fonts],
+        "clearColor": clear_color
+    }
+
+    with open(filepath, "w") as f:
+        json.dump(bdx, f)
+
+    # Start with nothing selected
+    bpy.ops.object.select_all(action='DESELECT')
+
+    # Loop through all objects in the scene
+    for obj in objects:
+
+        # Select it
+        scene.objects.active = obj
+        obj.select = True
+        ut.select_children_recursive(obj)
+
+        print(obj.type)
+
+        if obj.type == 'MESH' or obj.type == 'EMPTY':
+            # Export to G3D
+            bdx_dir = j(ut.project_root(), "android", "assets", "bdx")
+            output_path = j(bdx_dir, obj.name + '.g3dj')
+            print("Writing to: " + output_path)
+            # bpy.ops.export_scene.fbx(filepath=output_path, use_selection=True)
+            #
+            # fbx_conv = j(ut.plugin_root(), 'fbx-conv', 'fbx-conv-win32.exe')
+            # print(fbx_conv)
+            # cmd = [fbx_conv, '-f', '-v', output_path, output_path.replace('.fbx', '.g3dj')]
+            # print(cmd)
+            # subprocess.call(cmd, shell=True)
+            bpy.ops.export_json_g3d.g3dj(filepath=output_path, useRelativePath=True, useSelection=True)
+
+        # Deselect this object again
+        obj.select = False
 
     return {'FINISHED'}
 
@@ -849,7 +931,8 @@ class ExportBdx(Operator, ExportHelper):
             )
 
     def execute(self, context):
-        return export(context, self.filepath, self.scene_name, self.exprun, self.apply_modifier)
+        # return export(context, self.filepath, self.scene_name, self.exprun, self.apply_modifier)
+        return export_ebg(context, self.filepath, self.scene_name, self.exprun, self.apply_modifier)
 
 
 def menu_func_export(self, context):
